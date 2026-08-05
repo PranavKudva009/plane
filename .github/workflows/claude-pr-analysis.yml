@@ -1,4 +1,4 @@
-name: Claude PR Code Analysis
+name: Codex PR Code Analysis
 
 on:
   workflow_dispatch:
@@ -13,7 +13,7 @@ permissions:
   contents: read
 
 jobs:
-  analyze-with-claude:
+  analyze-with-codex:
     runs-on: ubuntu-latest
     
     steps:
@@ -66,14 +66,14 @@ jobs:
         run: |
           pip install -r .github/scripts/requirements.txt
           
-      - name: Run Claude Analysis
+      - name: Run Codex Analysis
         env:
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PR_NUMBER: ${{ inputs.pr_number }}
           REPO_NAME: ${{ github.repository }}
         run: |
-          python .github/scripts/claude_analyzer.py
+          python .github/scripts/codex_analyzer.py
           
       - name: Post Analysis Results
         if: always()
@@ -87,7 +87,7 @@ jobs:
             const results = JSON.parse(fs.readFileSync('analysis_results.json', 'utf8'));
             
             // Format the comment
-            let comment = '## 🤖 Claude AI Code Analysis\n\n';
+            let comment = '## 🤖 Codex AI Code Analysis\n\n';
             comment += `*Manually triggered analysis for PR #${{ inputs.pr_number }}*\n\n`;
             
             for (const [category, analysis] of Object.entries(results)) {
@@ -104,7 +104,7 @@ jobs:
               }
             }
             
-            comment += '\n---\n*Analysis powered by Claude Sonnet 4*';
+            comment += '\n---\n*Analysis powered by OpenAI Codex*';
             
             // Post comment
             await github.rest.issues.createComment({
