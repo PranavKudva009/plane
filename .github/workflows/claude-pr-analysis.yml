@@ -1,115 +1,147 @@
-name: Codex PR Code Analysis
+name: Codex Branch Code Analysis
 
 on:
+  push:
+    branches:
+      - preview
   workflow_dispatch:
-    inputs:
-      pr_number:
-        description: 'PR number to analyze'
-        required: true
-        type: number
 
 permissions:
-  pull-requests: write
   contents: read
+  issues: write
 
 jobs:
   analyze-with-codex:
     runs-on: ubuntu-latest
     
     steps:
-      - name: Get PR details
-        id: pr-info
-        uses: actions/github-script@v7
-        with:
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          script: |
-            const pr = await github.rest.pulls.get({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              pull_number: ${{ inputs.pr_number }}
-            });
-            
-            core.setOutput('base_ref', pr.data.base.ref);
-            core.setOutput('head_ref', pr.data.head.ref);
-            core.setOutput('head_sha', pr.data.head.sha);
-            
-            console.log(`Analyzing PR #${{ inputs.pr_number }}`);
-            console.log(`Base: ${pr.data.base.ref}, Head: ${pr.data.head.ref}`);
-      
       - name: Checkout code
         uses: actions/checkout@v4
         with:
-          ref: ${{ steps.pr-info.outputs.head_sha }}
           fetch-depth: 0
           
-      - name: Fetch base branch
+      - name: Fetch main branch for comparison
         run: |
-          git fetch origin ${{ steps.pr-info.outputs.base_ref }}:${{ steps.pr-info.outputs.base_ref }}
+          git fetch origin main:main || git fetch origin master:master || echo "Could not fetch main/master"
+          
+      - name: Determine base branch
+        id: base-branch
+        run: |
+          if git show-ref --verify --quiet refs/heads/main; then
+            echo "base=main" >> $GITHUB_OUTPUT
+            echo "Base branch: main"
+          elif git show-ref --verify --quiet refs/heads/master; then
+            echo "base=master" >> $GITHUB_OUTPUT
+            echo "Base branch: master"
+          else
+            echo "base=main" >> $GITHUB_OUTPUT
+            echo "Defaulting to main"
+          fi
           
       - name: Get changed files
         id: changed-files
         run: |
-          # Get list of changed files
-          git diff --name-only origin/${{ steps.pr-info.outputs.base_ref }}...HEAD > changed_files.txt
-          echo "Changed files:"
+          BASE_BRANCH="${{ steps.base-branch.outputs.base }}"
+          
+          # Get list of changed files compared to base branch
+          git diff --name-only $BASE_BRANCH...HEAD > changed_files.txt
+          echo "Changed files compared to $BASE_BRANCH:"
           cat changed_files.txt
           
           # Get the actual diff
-          git diff origin/${{ steps.pr-info.outputs.base_ref }}...HEAD > changes.diff
+          git diff $BASE_BRANCH...HEAD > changes.diff
+          
+          # Count changes
+          CHANGED_COUNT=$(wc -l < changed_files.txt | tr -d ' ')
+          echo "changed_count=$CHANGED_COUNT" >> $GITHUB_OUTPUT
+          echo "Total changed files: $CHANGED_COUNT"
           
       - name: Setup Python
+        if: steps.changed-files.outputs.changed_count != '0'
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
           
       - name: Install dependencies
+        if: steps.changed-files.outputs.changed_count != '0'
         run: |
           pip install -r .github/scripts/requirements.txt
           
       - name: Run Codex Analysis
+        if: steps.changed-files.outputs.changed_count != '0'
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          PR_NUMBER: ${{ inputs.pr_number }}
           REPO_NAME: ${{ github.repository }}
+          BRANCH_NAME: ${{ github.ref_name }}
+          BASE_BRANCH: ${{ steps.base-branch.outputs.base }}
+          COMMIT_SHA: ${{ github.sha }}
         run: |
           python .github/scripts/codex_analyzer.py
           
-      - name: Post Analysis Results
-        if: always()
+      - name: Create Issue with Analysis Results
+        if: steps.changed-files.outputs.changed_count != '0' && always()
         uses: actions/github-script@v7
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
             const fs = require('fs');
             
+            // Check if analysis results exist
+            if (!fs.existsSync('analysis_results.json')) {
+              console.log('No analysis results found, skipping issue creation');
+              return;
+            }
+            
             // Read analysis results
             const results = JSON.parse(fs.readFileSync('analysis_results.json', 'utf8'));
             
-            // Format the comment
-            let comment = '## 🤖 Codex AI Code Analysis\n\n';
-            comment += `*Manually triggered analysis for PR #${{ inputs.pr_number }}*\n\n`;
+            // Format the issue body
+            let body = '## 🤖 Codex AI Code Analysis\n\n';
+            body += `**Branch:** \`${{ github.ref_name }}\`\n`;
+            body += `**Commit:** \`${{ github.sha }}\`\n`;
+            body += `**Base:** \`${{ steps.base-branch.outputs.base }}\`\n`;
+            body += `**Triggered by:** Push to preview branch\n\n`;
+            body += '---\n\n';
+            
+            let hasIssues = false;
             
             for (const [category, analysis] of Object.entries(results)) {
               const emoji = analysis.issues_found ? '⚠️' : '✅';
-              comment += `### ${emoji} ${category}\n\n`;
-              comment += `${analysis.summary}\n\n`;
+              if (analysis.issues_found) hasIssues = true;
+              
+              body += `### ${emoji} ${category}\n\n`;
+              body += `${analysis.summary}\n\n`;
               
               if (analysis.details && analysis.details.length > 0) {
-                comment += '<details>\n<summary>View Details</summary>\n\n';
+                body += '<details>\n<summary>View Details</summary>\n\n';
                 analysis.details.forEach(detail => {
-                  comment += `- ${detail}\n`;
+                  body += `- ${detail}\n`;
                 });
-                comment += '</details>\n\n';
+                body += '</details>\n\n';
               }
             }
             
-            comment += '\n---\n*Analysis powered by OpenAI Codex*';
+            body += '\n---\n';
+            body += `*Analysis powered by OpenAI Codex*\n`;
+            body += `*Workflow run: [${{ github.run_id }}](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})*`;
             
-            // Post comment
-            await github.rest.issues.createComment({
+            // Create an issue with the results
+            const title = hasIssues 
+              ? `⚠️ Code Analysis: Issues found in preview branch` 
+              : `✅ Code Analysis: No issues found in preview branch`;
+            
+            const issue = await github.rest.issues.create({
               owner: context.repo.owner,
               repo: context.repo.repo,
-              issue_number: ${{ inputs.pr_number }},
-              body: comment
+              title: title,
+              body: body,
+              labels: ['code-analysis', 'preview-branch']
             });
+            
+            console.log(`Created issue #${issue.data.number}`);
+            
+      - name: Summary
+        if: steps.changed-files.outputs.changed_count == '0'
+        run: |
+          echo "No changes detected compared to base branch. Skipping analysis."
