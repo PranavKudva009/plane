@@ -18,69 +18,35 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0
-          
-      - name: Fetch main branch for comparison
-        run: |
-          git fetch origin main:main || git fetch origin master:master || echo "Could not fetch main/master"
-          
-      - name: Determine base branch
-        id: base-branch
-        run: |
-          if git show-ref --verify --quiet refs/heads/main; then
-            echo "base=main" >> $GITHUB_OUTPUT
-            echo "Base branch: main"
-          elif git show-ref --verify --quiet refs/heads/master; then
-            echo "base=master" >> $GITHUB_OUTPUT
-            echo "Base branch: master"
-          else
-            echo "base=main" >> $GITHUB_OUTPUT
-            echo "Defaulting to main"
-          fi
-          
-      - name: Get changed files
-        id: changed-files
-        run: |
-          BASE_BRANCH="${{ steps.base-branch.outputs.base }}"
-          
-          # Get list of changed files compared to base branch
-          git diff --name-only $BASE_BRANCH...HEAD > changed_files.txt
-          echo "Changed files compared to $BASE_BRANCH:"
-          cat changed_files.txt
-          
-          # Get the actual diff
-          git diff $BASE_BRANCH...HEAD > changes.diff
-          
-          # Count changes
-          CHANGED_COUNT=$(wc -l < changed_files.txt | tr -d ' ')
-          echo "changed_count=$CHANGED_COUNT" >> $GITHUB_OUTPUT
-          echo "Total changed files: $CHANGED_COUNT"
+          fetch-depth: 2
           
       - name: Setup Python
-        if: steps.changed-files.outputs.changed_count != '0'
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
           
       - name: Install dependencies
-        if: steps.changed-files.outputs.changed_count != '0'
         run: |
           pip install -r .github/scripts/requirements.txt
           
       - name: Run Codex Analysis
-        if: steps.changed-files.outputs.changed_count != '0'
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO_NAME: ${{ github.repository }}
           BRANCH_NAME: ${{ github.ref_name }}
-          BASE_BRANCH: ${{ steps.base-branch.outputs.base }}
           COMMIT_SHA: ${{ github.sha }}
         run: |
+          # Create the diff file comparing HEAD with previous commit
+          git diff HEAD^ HEAD > changes.diff
+          
+          echo "Analyzing changes in commit ${{ github.sha }}"
+          
+          # Run the analyzer
           python .github/scripts/codex_analyzer.py
           
       - name: Create Issue with Analysis Results
-        if: steps.changed-files.outputs.changed_count != '0' && always()
+        if: always()
         uses: actions/github-script@v7
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
@@ -100,7 +66,7 @@ jobs:
             let body = '## 🤖 Codex AI Code Analysis\n\n';
             body += `**Branch:** \`${{ github.ref_name }}\`\n`;
             body += `**Commit:** \`${{ github.sha }}\`\n`;
-            body += `**Base:** \`${{ steps.base-branch.outputs.base }}\`\n`;
+            body += `**Comparison:** \`HEAD^\` vs \`HEAD\`\n`;
             body += `**Triggered by:** Push to preview branch\n\n`;
             body += '---\n\n';
             
@@ -140,8 +106,3 @@ jobs:
             });
             
             console.log(`Created issue #${issue.data.number}`);
-            
-      - name: Summary
-        if: steps.changed-files.outputs.changed_count == '0'
-        run: |
-          echo "No changes detected compared to base branch. Skipping analysis."
